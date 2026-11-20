@@ -16,6 +16,42 @@ from .selectors import get_trip_by_id
 logger = logging.getLogger(__name__)
 
 
+def deduplicate_urls(urls: list[str]) -> list[str]:
+    """Deduplicates a list of URLs while preserving their original order."""
+    seen = set()
+    deduped = []
+    for u in urls:
+        clean = u.strip() if isinstance(u, str) else ""
+        if clean and clean not in seen:
+            seen.add(clean)
+            deduped.append(clean)
+    return deduped
+
+
+def post_process_itinerary(
+    itinerary: TripItinerarySchema,
+    origin: Optional[str] = None,
+    destination: Optional[str] = None,
+) -> TripItinerarySchema:
+    """
+    Post-processes the generated itinerary:
+    1. Deduplicates heroImages while preserving order.
+    2. Ensures flight bookingSearchUrl covers the complete origin-to-destination route.
+    """
+    if getattr(itinerary, "heroImages", None):
+        itinerary.heroImages = deduplicate_urls(itinerary.heroImages)
+
+    if origin and destination and getattr(itinerary, "flightOptions", None):
+        origin_clean = origin.strip()
+        dest_clean = destination.strip()
+        full_flight_url = f"https://www.google.com/travel/flights?q=flights+from+{origin_clean.replace(' ', '+')}+to+{dest_clean.replace(' ', '+')}"
+        for flight in itinerary.flightOptions:
+            if not flight.bookingSearchUrl or "flights" not in flight.bookingSearchUrl.lower():
+                flight.bookingSearchUrl = full_flight_url
+
+    return itinerary
+
+
 def clean_json_text(raw_text: str) -> str:
     """Strips markdown code fences and returns pure JSON string."""
     text = raw_text.strip()
@@ -35,20 +71,27 @@ def build_system_instruction() -> str:
         "Your mission is to craft ultra-actionable, search-grounded, day-by-day travel roadmaps "
         "tailored for travelers who manual-book their own trips.\n\n"
         "ACCURACY & CURRENCY MANDATES:\n"
-        "1. Active Airlines Only: Only recommend currently operating airlines with real active routes "
+        "1. Active Airlines Only & Full Origin-to-Destination Flight Routes:\n"
+        "   - Recommend only currently operating airlines with real active routes "
         "(e.g., Air India, IndiGo, Japan Airlines (JAL), All Nippon Airways (ANA), Singapore Airlines, Emirates, "
-        "Qatar Airways, AirAsia). NEVER recommend defunct, rebranded, or merged carriers (such as Vistara).\n"
+        "Qatar Airways, Air France, Lufthansa, AirAsia). NEVER recommend defunct, rebranded, or merged carriers (such as Vistara).\n"
+        "   - MANDATORY FULL-JOURNEY ROUTE: Every 'flightOptions' entry MUST cover the entire journey starting from the user's origin "
+        "and ending at the final destination (e.g. 'CNN → DXB → CDG' or 'CNN → DEL → CDG'). NEVER truncate or stop at a layover/hub city.\n"
+        "   - Multi-Leg & 2-Ticket Connection Support: When direct flights are unavailable (common for regional/tier-2 airports), "
+        "provide realistic connecting routes (single-ticket or multi-ticket self-transfers). Write the complete path in 'route' (e.g., 'CNN → DXB → CDG'), "
+        "clearly indicate layover/ticket structure in 'stops' (e.g., '1 Stop via DXB (2 Separate Tickets)' or '1 Stop (DOH)'), "
+        "and explain connection duration, terminal transfers, and baggage re-check requirements cleanly in 'tip'.\n"
         "2. Real Dining & Dietary Verifiability: Recommend only real, verifiable, currently operating restaurants, "
         "izakayas, and cafes. Pay strict attention to traveler dietary notes (e.g., for vegetarian/vegan ramen in Tokyo, "
         "recommend renowned verifiable spots like T's TanTan, Afuri, or Kyushu Jangara; for Dubai, authentic spots like Al Mallah, Ravi Restaurant, or Zuma).\n"
         "3. Rich Daily Dining: Provide 2 to 3 distinct restaurant picks per day (e.g. lunch, dinner, cafe/sweet treat).\n"
         "4. Real Accommodations: Recommend real, verified hotels matching the budget and travel style.\n"
         "5. Valid Booking Search URLs:\n"
-        "   - Flights: Direct Google Flights search links (https://www.google.com/travel/flights?q=flights+from+{origin}+to+{destination}) or Skyscanner.\n"
+        "   - Flights: Direct Google Flights search links covering the FULL origin-to-destination route (https://www.google.com/travel/flights?q=flights+from+{origin}+to+{destination}) or Skyscanner.\n"
         "   - Hotels: Direct Google Hotels search links (https://www.google.com/travel/hotels?q=hotels+in+{destination}) or Booking.com.\n"
         "   - Activities & Dining: Direct Google Maps search URLs (https://www.google.com/maps/search/?api=1&query={query}).\n"
         "6. High-Resolution Visual Photography URLs:\n"
-        "   - 'heroImages': MUST provide an array of exactly 5 distinct, high-resolution landscape photo URLs matching the destination city and its most iconic landmarks (e.g. for Dubai: Burj Khalifa, Dubai Marina, Desert Safari, Palm Jumeirah, Dubai Creek; for Paris: Eiffel Tower, Louvre, Seine, Montmartre, Arc de Triomphe). NEVER provide images of a different city.\n"
+        "   - 'heroImages': MUST provide an array of 3 to 5 distinct, unique high-resolution landscape photo URLs matching the destination city and its most iconic landmarks (e.g. for Paris: Eiffel Tower, Louvre Museum, Seine River, Montmartre, Arc de Triomphe; for Dubai: Burj Khalifa, Dubai Marina, Desert Safari, Palm Jumeirah, Dubai Creek). Every URL in 'heroImages' MUST be distinct—NEVER repeat the same URL or landmark photo twice.\n"
         "   - Every 'ActivityItem': MUST include 'imageUrl' with a high-resolution landscape photo URL matching that specific stop/landmark (e.g. Burj Khalifa, Dubai Mall, Meiji Shrine).\n"
         "   - Every 'RestaurantPick': MUST include 'imageUrl' with a high-resolution photo URL matching the restaurant's cuisine, signature dish, or dining ambiance (e.g. Lebanese grill for Al Mallah, biryani for Ravi, black cod/sushi for Zuma).\n"
         "   - Use valid, high-resolution Unsplash URLs (e.g., https://images.unsplash.com/photo-... with appropriate photo IDs or parameters) or Wikimedia Commons URLs.\n"
@@ -72,11 +115,14 @@ def build_prompt(
     budget_str = f"{budget} {currency}" if budget else f"Flexible budget ({currency})"
     style_str = travel_style or "Balanced (culture, leisure, food)"
     notes_str = extra_notes or "None"
+    origin_clean = origin.strip()
+    dest_clean = destination.strip()
+    flight_search_query = f"flights+from+{origin_clean.replace(' ', '+')}+to+{dest_clean.replace(' ', '+')}"
 
     return f"""
 Plan a detailed, realistic travel roadmap for:
-- Origin: {origin}
-- Destination: {destination}
+- Origin: {origin_clean}
+- Destination: {dest_clean}
 - Duration: {days} days
 - Group Size: {members} traveler(s)
 - Total Estimated Budget: {budget_str}
@@ -85,11 +131,22 @@ Plan a detailed, realistic travel roadmap for:
 - Traveler Notes / Special Requests: {notes_str}
 
 Requirements:
-1. Search and provide 2-3 realistic flight options with routes, airlines, duration, and direct booking links.
-   Only include currently operating airlines (e.g., Air India, IndiGo, JAL, ANA, Singapore Airlines, Emirates, AirAsia; never defunct or merged carriers like Vistara).
+1. Complete Origin-to-Destination Flight Options (Strict Routing Mandate):
+   - Provide 2-3 realistic flight options covering the COMPLETE journey from {origin_clean} all the way to {dest_clean}.
+   - ABSOLUTE ROUTE MANDATE: Every single FlightOption MUST start at {origin_clean} and end at {dest_clean} (e.g. "{origin_clean} → DXB → {dest_clean}", "{origin_clean} → DOH → {dest_clean}", "{origin_clean} → DEL → {dest_clean}").
+     NEVER terminate a flight route early at an intermediate layover/hub city (e.g., do NOT return only CNN -> DEL or CNN -> DXB when the traveler is going to {dest_clean}).
+   - Multi-Leg & 2-Ticket Connection Support:
+     When direct single-ticket flights are unavailable from regional or secondary origins (e.g., Kannur, Kochi, Kozhikode, Goa, Jaipur), provide realistic connecting routes or 2-ticket self-transfers:
+     * 'route': State the complete leg-by-leg path from origin to final destination (e.g. "{origin_clean} → DXB → {dest_clean}").
+     * 'stops': Clearly specify the layover airport and ticket structure (e.g. "1 Stop via DXB (2 Separate Tickets)", "1 Stop (DOH)", or "2 Stops (DEL, CDG)").
+     * 'tip': Detail the connection, layover duration, and clear self-transfer/baggage re-check tips if 2 separate tickets are required.
+     * 'bookingSearchUrl': MUST be a direct search link covering the full origin-to-destination route:
+       https://www.google.com/travel/flights?q={flight_search_query}
+   - Airline Currency: Recommend only currently operating airlines (e.g., Air India, IndiGo, Emirates, Qatar Airways, Air France, Lufthansa, Singapore Airlines, JAL, ANA; never defunct or merged carriers like Vistara).
 2. Search and recommend 2-3 verified hotels matching nightly budget, neighborhood, and ratings with direct Google Hotels booking links.
 3. Destination Hero Photography:
-   Provide 'heroImages' containing exactly 5 distinct, high-resolution landscape photo URLs showcasing {destination} and its top iconic sights (never use photos of other cities).
+   Provide 'heroImages' containing 3 to 5 distinct, high-resolution landscape photo URLs showcasing {dest_clean} and its top iconic sights.
+   CRITICAL: Every URL in 'heroImages' MUST be distinct and show a different landmark (never repeat identical URLs).
 4. Construct a full, realistic day-by-day itinerary:
    CRITICAL: The 'days' array MUST contain exactly {days} complete objects numbered Day 1 through Day {days}. Never truncate, summarize, or omit later days.
    Keep each activity description concise (strictly 1-2 crisp sentences) so the entire {days}-day roadmap fits comfortably within token limits without truncation.
@@ -145,7 +202,8 @@ def _generate_with_groq(prompt: str) -> TripItinerarySchema:
         f"{schema_json}\n\n"
         "Ensure every single key is present: 'tripTitle', 'summary', 'heroImages', 'budgetBreakdown', "
         "'flightOptions', 'hotelRecommendations', 'days'.\n"
-        "'heroImages' must be an array of exactly 5 high-resolution landscape photo URLs matching the destination.\n"
+        "'heroImages' must be an array of 3 to 5 distinct, unique high-resolution landscape photo URLs matching different landmarks of the destination (never repeat identical URLs).\n"
+        "Every flight in 'flightOptions' MUST cover the full origin-to-destination journey, with 'bookingSearchUrl' searching the full route.\n"
         "Each activity in 'days' must include an 'imageUrl' for that landmark/attraction.\n"
         "Each restaurant in 'days' must include an 'imageUrl' for that cuisine/dish, with 2-3 restaurant picks per day.\n"
         "All booking search URLs for flights must be direct Google Flights or Skyscanner search links.\n"
@@ -175,7 +233,8 @@ def _generate_with_groq(prompt: str) -> TripItinerarySchema:
                 max_tokens=8192,
             )
             raw_text = clean_json_text(response.choices[0].message.content)
-            return TripItinerarySchema.model_validate_json(raw_text)
+            itinerary = TripItinerarySchema.model_validate_json(raw_text)
+            return post_process_itinerary(itinerary)
 
         except Exception as err:
             logger.warning("Groq generation with model '%s' encountered: %s", model_name, err)
@@ -224,7 +283,8 @@ def _generate_with_gemini(prompt: str) -> TripItinerarySchema:
                 config=config,
             )
             raw_text = clean_json_text(response.text)
-            return TripItinerarySchema.model_validate_json(raw_text)
+            itinerary = TripItinerarySchema.model_validate_json(raw_text)
+            return post_process_itinerary(itinerary)
 
         except Exception as err:
             err_str = str(err)
@@ -250,7 +310,8 @@ def _generate_with_gemini(prompt: str) -> TripItinerarySchema:
                     config=config_b,
                 )
                 raw_text = clean_json_text(response.text)
-                return TripItinerarySchema.model_validate_json(raw_text)
+                itinerary = TripItinerarySchema.model_validate_json(raw_text)
+                return post_process_itinerary(itinerary)
             except Exception as err_b:
                 err_b_str = str(err_b)
                 if "429" in err_b_str or "RESOURCE_EXHAUSTED" in err_b_str:
@@ -348,6 +409,7 @@ def generate_trip_itinerary(prompt: str, expected_days: Optional[int] = None) ->
     """
     try:
         itinerary = _dispatch_ai_generation(prompt, expected_days=expected_days)
+        itinerary = post_process_itinerary(itinerary)
         if expected_days is not None:
             validate_itinerary_structure(itinerary, expected_days)
         return itinerary
@@ -407,6 +469,7 @@ def generate_trip_plan(
     )
 
     itinerary_schema = generate_trip_itinerary(prompt, expected_days=days)
+    itinerary_schema = post_process_itinerary(itinerary_schema, origin=origin, destination=destination)
     itinerary_dict = itinerary_schema.model_dump()
 
     trip_plan = TripPlan.objects.create(

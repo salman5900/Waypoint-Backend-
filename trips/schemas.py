@@ -1,5 +1,5 @@
 from typing import List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class FlightOption(BaseModel):
@@ -61,9 +61,21 @@ class TripItinerarySchema(BaseModel):
     summary: str = Field(..., description="High-level overview of the travel itinerary")
     heroImages: List[str] = Field(
         default_factory=list,
-        description="5 distinct, high-resolution landscape photo URLs matching the destination city and iconic landmarks"
+        description="3 to 5 distinct, high-resolution landscape photo URLs matching the destination city and iconic landmarks (never repeat identical URLs)"
     )
     budgetBreakdown: BudgetBreakdown = Field(..., description="Itemized budget allocation")
     flightOptions: List[FlightOption] = Field(default_factory=list, description="Curated flight options with direct booking links")
     hotelRecommendations: List[HotelRecommendation] = Field(default_factory=list, description="Curated hotel options with direct booking links")
     days: List[DayPlan] = Field(default_factory=list, description="Day-by-day itinerary roadmap")
+
+    @field_validator('heroImages', mode='after')
+    @classmethod
+    def deduplicate_hero_images(cls, v: List[str]) -> List[str]:
+        seen = set()
+        deduped = []
+        for url in v:
+            clean_url = url.strip() if isinstance(url, str) else ""
+            if clean_url and clean_url not in seen:
+                seen.add(clean_url)
+                deduped.append(clean_url)
+        return deduped

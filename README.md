@@ -6,7 +6,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?style=flat&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Groq](https://img.shields.io/badge/Groq_LPU-openai%2Fgpt--oss-F05A28?style=flat)](https://groq.com/)
 [![Gemini](https://img.shields.io/badge/Google_Gemini-3.8--flash-4285F4?style=flat&logo=google&logoColor=white)](https://ai.google.dev/)
-[![Tests](https://img.shields.io/badge/Tests-43%20Passing%20(100%25)-brightgreen?style=flat)]()
+[![Tests](https://img.shields.io/badge/Tests-46%20Passing%20(100%25)-brightgreen?style=flat)]()
 
 Waypoint Backend is a high-performance, modular, zero-spaghetti backend service built with **Django 6.1**, **Django REST Framework (DRF)**, and **PostgreSQL**. It powers the Waypoint AI travel planner with search-grounded day-by-day itineraries, manual booking links, destination photography, hybrid authentication, and automated email roadmaps.
 
@@ -33,11 +33,12 @@ The backend strictly enforces the **Thin Views, Fat Services, Dedicated Selector
    - **Secondary Provider (Google Gemini):** Google GenAI SDK fallback with Search Grounding support (`gemini-3.8-flash`, `gemini-3.5-flash`).
    - **Multi-Day Completeness & Auto-Retry:** Generates complete 1–14 day itineraries without truncation. If an upstream model returns fewer days than requested, the system automatically retries with a strict correction prompt or cascades to the secondary provider before returning an error.
 2. **Visual Travel Photography:**
-   - **5 Destination Hero Images:** High-resolution landscape URLs representing iconic sights of the destination.
+   - **3 to 5 Destination Hero Images:** High-resolution, deduplicated landscape URLs representing distinct iconic sights of the destination.
    - **Activity Images:** Accurate landscape photo URLs for each landmark or tour stop.
    - **Dining Images:** Cuisine, signature dish, or ambiance photography for 2–3 dining picks per day.
-3. **Manual Booking Links:**
-   - Direct search query links for Google Flights, Google Hotels, and Google Maps (for activities and restaurants).
+3. **Manual Booking Links & Full Route Flights:**
+   - Mandatory origin-to-destination flight routing with full multi-leg and 2-ticket connection support.
+   - Direct search query links for Google Flights (searching the complete origin-to-destination route), Google Hotels, and Google Maps (for activities and restaurants).
 4. **Hybrid Authentication:**
    - Classical username/email + password registration and login.
    - Passwordless 6-digit cryptographic Email OTP (auto-provisions new users, 10-minute expiry, 5-attempt rate-limit lockout).

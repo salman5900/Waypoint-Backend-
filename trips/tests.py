@@ -233,6 +233,51 @@ class AIProviderOrchestrationTests(APITestCase):
             self.assertEqual(result.tripTitle, "Tokyo Exploration: Neon & Tradition")
             self.assertEqual(len(result.days), 3)
 
+    def test_hero_images_deduplication(self):
+        duplicate_urls = [
+            "https://images.unsplash.com/photo-1",
+            "https://images.unsplash.com/photo-2",
+            "https://images.unsplash.com/photo-1",
+            "https://images.unsplash.com/photo-3",
+            "https://images.unsplash.com/photo-2",
+        ]
+        schema = get_mock_itinerary_schema(3)
+        schema.heroImages = duplicate_urls
+        processed = services.post_process_itinerary(schema)
+        self.assertEqual(
+            processed.heroImages,
+            [
+                "https://images.unsplash.com/photo-1",
+                "https://images.unsplash.com/photo-2",
+                "https://images.unsplash.com/photo-3",
+            ],
+        )
+
+    def test_build_prompt_full_flight_routing_rules(self):
+        prompt = services.build_prompt(
+            origin="Kannur (CNN)",
+            destination="Paris (CDG)",
+            days=5,
+            members=2,
+            budget=250000.0,
+            currency="INR",
+            travel_style="Balanced",
+            extra_notes="Vegetarian dining",
+        )
+        self.assertIn("Kannur (CNN)", prompt)
+        self.assertIn("Paris (CDG)", prompt)
+        self.assertIn("Complete Origin-to-Destination Flight Options", prompt)
+        self.assertIn("ABSOLUTE ROUTE MANDATE", prompt)
+        self.assertIn("Multi-Leg & 2-Ticket Connection Support", prompt)
+        self.assertIn("flights+from+Kannur+(CNN)+to+Paris+(CDG)", prompt)
+        self.assertIn("3 to 5 distinct, high-resolution landscape photo URLs", prompt)
+
+    def test_post_process_itinerary_normalizes_flight_booking_url(self):
+        schema = get_mock_itinerary_schema(3)
+        schema.flightOptions[0].bookingSearchUrl = ""
+        processed = services.post_process_itinerary(schema, origin="Kannur (CNN)", destination="Paris (CDG)")
+        self.assertIn("flights+from+Kannur+(CNN)+to+Paris+(CDG)", processed.flightOptions[0].bookingSearchUrl)
+
 
 class TripGenerationTests(APITestCase):
     def setUp(self):
