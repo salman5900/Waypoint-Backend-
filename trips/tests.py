@@ -157,6 +157,23 @@ class AIProviderOrchestrationTests(APITestCase):
                 services.generate_trip_itinerary("test prompt")
             self.assertIn("AI travel concierge service unavailable", str(ctx.exception))
 
+    @patch('trips.services._generate_with_gemini')
+    @patch('trips.services._generate_with_groq')
+    def test_orchestrator_falls_back_to_gemini_when_groq_returns_incomplete_days(self, mock_groq, mock_gemini):
+        # Primary Groq returns truncated 7 days on both initial and retry
+        mock_groq.return_value = get_mock_itinerary_schema(7)
+        # Secondary Gemini returns full 10 days
+        mock_gemini.return_value = get_mock_itinerary_schema(10)
+
+        with self.settings(AI_PROVIDER='groq'):
+            result = services.generate_trip_itinerary("prompt for 10 days", expected_days=10)
+            self.assertEqual(result.tripTitle, "Tokyo Exploration: Neon & Tradition")
+            self.assertEqual(len(result.days), 10)
+            # Groq attempted twice (initial + 1 retry) before fallback
+            self.assertEqual(mock_groq.call_count, 2)
+            # Gemini called as fallback and succeeded
+            mock_gemini.assert_called_once()
+
     @patch('trips.services._dispatch_ai_generation')
     def test_day_count_validation_triggers_automatic_retry(self, mock_dispatch):
         # 1st call returns truncated 1 day; 2nd call (retry) returns all 3 days

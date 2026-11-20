@@ -52,8 +52,10 @@ def build_system_instruction() -> str:
         "   - Every 'ActivityItem': MUST include 'imageUrl' with a high-resolution landscape photo URL matching that specific stop/landmark (e.g. Burj Khalifa, Dubai Mall, Meiji Shrine).\n"
         "   - Every 'RestaurantPick': MUST include 'imageUrl' with a high-resolution photo URL matching the restaurant's cuisine, signature dish, or dining ambiance (e.g. Lebanese grill for Al Mallah, biryani for Ravi, black cod/sushi for Zuma).\n"
         "   - Use valid, high-resolution Unsplash URLs (e.g., https://images.unsplash.com/photo-... with appropriate photo IDs or parameters) or Wikimedia Commons URLs.\n"
-        "7. Complete Multi-Day Coverage: Never truncate, abbreviate, or omit later days. The 'days' array in your output "
-        "must contain complete, unabbreviated plans for every single requested day, with at least 2 activities and 2 to 3 restaurant picks per day."
+        "7. Complete Multi-Day Coverage & Concise Descriptions: Never truncate, summarize, or omit later days. "
+        "The 'days' array in your output MUST contain complete, unabbreviated plans for every single requested day (Day 1 through Day N). "
+        "To ensure all days fit within the token budget without cutting off, keep each activity description concise (1-2 crisp, vivid sentences). "
+        "Provide at least 2 activities and 2 to 3 restaurant picks per day."
     )
 
 
@@ -90,8 +92,9 @@ Requirements:
    Provide 'heroImages' containing exactly 5 distinct, high-resolution landscape photo URLs showcasing {destination} and its top iconic sights (never use photos of other cities).
 4. Construct a full, realistic day-by-day itinerary:
    CRITICAL: The 'days' array MUST contain exactly {days} complete objects numbered Day 1 through Day {days}. Never truncate, summarize, or omit later days.
+   Keep each activity description concise (strictly 1-2 crisp sentences) so the entire {days}-day roadmap fits comfortably within token limits without truncation.
    Each day object MUST contain:
-   - At least 2 distinct activities, each with an accurate 'imageUrl' matching that specific stop or landmark.
+   - At least 2 distinct activities, each with a concise description (1-2 crisp sentences) and an accurate 'imageUrl' matching that specific stop or landmark.
    - 2 to 3 authentic restaurant picks per day matching any dietary requirements in Traveler Notes, each with an accurate 'imageUrl' matching the cuisine, signature dish, or dining ambiance.
 5. Calculate an itemized budget breakdown in {currency} covering flights, accommodation, food, activities, and total.
 """
@@ -125,7 +128,7 @@ def _generate_with_groq(prompt: str) -> TripItinerarySchema:
     """
     Primary AI generation provider using Groq LPU inference.
     Enforces pure structured JSON according to TripItinerarySchema.model_json_schema().
-    Includes max_tokens=6000 and temperature=0.4 to prevent early multi-day truncation.
+    Includes max_tokens=8192 and temperature=0.4 to prevent early multi-day truncation.
     """
     api_key = getattr(settings, 'GROQ_API_KEY', '').strip()
     if not api_key:
@@ -153,14 +156,14 @@ def _generate_with_groq(prompt: str) -> TripItinerarySchema:
 
     primary_model = getattr(settings, 'GROQ_MODEL', 'llama-3.3-70b-versatile').strip() or 'llama-3.3-70b-versatile'
     candidate_models = [primary_model]
-    for fallback in ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b', 'openai/gpt-oss-20b']:
+    for fallback in ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b']:
         if fallback not in candidate_models:
             candidate_models.append(fallback)
 
     last_error = None
     for model_name in candidate_models:
         try:
-            logger.info("Attempting Groq itinerary generation with model '%s' (max_tokens=6000, temp=0.4)...", model_name)
+            logger.info("Attempting Groq itinerary generation with model '%s' (max_tokens=8192, temp=0.4)...", model_name)
             response = client.chat.completions.create(
                 model=model_name,
                 messages=[
@@ -169,7 +172,7 @@ def _generate_with_groq(prompt: str) -> TripItinerarySchema:
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.4,
-                max_tokens=6000,
+                max_tokens=8192,
             )
             raw_text = clean_json_text(response.choices[0].message.content)
             return TripItinerarySchema.model_validate_json(raw_text)
@@ -262,56 +265,105 @@ def _generate_with_gemini(prompt: str) -> TripItinerarySchema:
     raise AIServiceError(error_msg)
 
 
-def _dispatch_ai_generation(prompt: str) -> TripItinerarySchema:
-    """Dispatches generation to the configured primary provider and falls back to secondary on failure."""
-    primary_provider = getattr(settings, 'AI_PROVIDER', 'groq').strip().lower()
+def _generate_with_provider(
+    provider_name: str,
+    prompt: str,
+    expected_days: Optional[int] = None,
+) -> TripItinerarySchema:
+    """
+    Executes itinerary generation for a single provider ('groq' or 'gemini').
+    If expected_days is specified and completeness validation fails (e.g. day count mismatch),
+    automatically retries once with an explicit correction prompt before raising ValueError.
+    """
+    gen_func = _generate_with_groq if provider_name == 'groq' else _generate_with_gemini
+    itinerary = gen_func(prompt)
+    if expected_days is not None:
+        try:
+            validate_itinerary_structure(itinerary, expected_days)
+        except ValueError as val_err:
+            logger.warning(
+                "%s itinerary completeness validation failed on initial attempt: %s. Retrying once...",
+                provider_name.capitalize(),
+                val_err,
+            )
+            retry_prompt = (
+                prompt +
+                f"\n\nCRITICAL CORRECTION REQUIRED:\n"
+                f"Your previous output failed completeness validation: {val_err}\n"
+                f"You MUST generate exactly {expected_days} complete day objects in the 'days' array (numbered Day 1 to Day {expected_days}). "
+                f"Keep each activity description strictly to 1-2 concise sentences so the full multi-day plan does not exceed token limits. "
+                f"Every single day must contain at least 2 distinct activities and at least 1 authentic restaurant pick. "
+                f"Do NOT truncate, compress, or omit any day."
+            )
+            itinerary = gen_func(retry_prompt)
+            validate_itinerary_structure(itinerary, expected_days)
+    return itinerary
 
-    if primary_provider == 'groq':
-        try:
-            return _generate_with_groq(prompt)
-        except Exception as groq_err:
-            logger.warning("Primary Groq provider failed: %s. Initiating Gemini fallback...", groq_err)
-            try:
-                return _generate_with_gemini(prompt)
-            except Exception as gemini_err:
-                logger.error("Both Groq and Gemini providers failed. Groq: %s | Gemini: %s", groq_err, gemini_err)
-                raise AIServiceError(f"AI travel concierge service unavailable. Groq error: {groq_err}; Gemini error: {gemini_err}")
-    else:
-        # Gemini is primary
-        try:
-            return _generate_with_gemini(prompt)
-        except Exception as gemini_err:
-            logger.warning("Primary Gemini provider failed: %s. Initiating Groq fallback...", gemini_err)
-            try:
-                return _generate_with_groq(prompt)
-            except Exception as groq_err:
-                logger.error("Both Gemini and Groq providers failed. Gemini: %s | Groq: %s", gemini_err, groq_err)
-                raise AIServiceError(f"AI travel concierge service unavailable. Gemini error: {gemini_err}; Groq error: {groq_err}")
+
+def _dispatch_ai_generation(prompt: str, expected_days: Optional[int] = None) -> TripItinerarySchema:
+    """
+    Dispatches generation to configured primary provider with automatic single-retry on day count mismatch.
+    If the primary provider fails (via exception or incomplete day count after retry), falls back
+    to the secondary provider (which also gets a single retry) before raising AIServiceError.
+    """
+    primary_provider = getattr(settings, 'AI_PROVIDER', 'groq').strip().lower()
+    secondary_provider = 'gemini' if primary_provider == 'groq' else 'groq'
+
+    primary_error = None
+    try:
+        return _generate_with_provider(primary_provider, prompt, expected_days=expected_days)
+    except Exception as prim_err:
+        primary_error = prim_err
+        logger.warning(
+            "Primary %s provider failed: %s. Initiating %s fallback...",
+            primary_provider,
+            prim_err,
+            secondary_provider,
+        )
+
+    try:
+        return _generate_with_provider(secondary_provider, prompt, expected_days=expected_days)
+    except Exception as sec_err:
+        logger.error(
+            "Both %s and %s providers failed. %s: %s | %s: %s",
+            primary_provider,
+            secondary_provider,
+            primary_provider,
+            primary_error,
+            secondary_provider,
+            sec_err,
+        )
+        raise AIServiceError(
+            f"AI travel concierge service unavailable. Primary ({primary_provider}) error: {primary_error}; "
+            f"Secondary ({secondary_provider}) error: {sec_err}"
+        )
 
 
 def generate_trip_itinerary(prompt: str, expected_days: Optional[int] = None) -> TripItinerarySchema:
     """
     Main AI Orchestrator:
     Dispatches generation to AI providers and enforces day count and activity/restaurant completeness.
-    If the returned itinerary has fewer days or missing activities/restaurants, retries once before raising AIServiceError.
+    If the primary provider returns fewer days than requested or fails, retries once, then falls back
+    to the secondary provider before raising AIServiceError.
     """
     try:
-        itinerary = _dispatch_ai_generation(prompt)
+        itinerary = _dispatch_ai_generation(prompt, expected_days=expected_days)
         if expected_days is not None:
             validate_itinerary_structure(itinerary, expected_days)
         return itinerary
     except ValueError as val_err:
-        logger.warning("Itinerary completeness validation failed on initial attempt: %s. Retrying generation once...", val_err)
+        logger.warning("Itinerary completeness validation failed: %s. Retrying generation once...", val_err)
         retry_prompt = (
             prompt +
             f"\n\nCRITICAL CORRECTION REQUIRED:\n"
             f"Your previous output failed completeness validation: {val_err}\n"
             f"You MUST generate exactly {expected_days} complete day objects in the 'days' array (numbered Day 1 to Day {expected_days}). "
+            f"Keep each activity description strictly to 1-2 crisp sentences. "
             f"Every single day must contain at least 2 distinct activities and at least 1 authentic restaurant pick. "
             f"Do NOT truncate, compress, or omit any day."
         )
         try:
-            itinerary = _dispatch_ai_generation(retry_prompt)
+            itinerary = _dispatch_ai_generation(retry_prompt, expected_days=expected_days)
             if expected_days is not None:
                 validate_itinerary_structure(itinerary, expected_days)
             return itinerary
