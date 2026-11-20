@@ -28,6 +28,64 @@ def deduplicate_urls(urls: list[str]) -> list[str]:
     return deduped
 
 
+def _extract_location_tokens(text: str) -> list[str]:
+    """Extracts lowercase tokens (length >= 3 or alphanumeric airport codes) from a location string."""
+    if not text:
+        return []
+    cleaned = (
+        text.replace("(", " ")
+        .replace(")", " ")
+        .replace(",", " ")
+        .replace("->", " ")
+        .replace("→", " ")
+        .replace("+", " ")
+    )
+    tokens = [t.strip().lower() for t in cleaned.split() if t.strip()]
+    return [t for t in tokens if len(t) >= 3 or t.isalpha()]
+
+
+def _normalize_flight_booking_url(current_url: str, origin: str, destination: str) -> str:
+    """
+    Ensures the flight bookingSearchUrl searches the complete origin-to-destination route.
+    If the current URL is missing, invalid, or only searches an intermediate leg (e.g. stops at a layover),
+    replaces it with a direct Google Flights search for the full route.
+    """
+    origin_clean = origin.strip()
+    dest_clean = destination.strip()
+    full_url = f"https://www.google.com/travel/flights?q=flights+from+{origin_clean.replace(' ', '+')}+to+{dest_clean.replace(' ', '+')}"
+
+    if not current_url or not isinstance(current_url, str):
+        return full_url
+
+    url_lower = current_url.lower()
+    if "flights" not in url_lower:
+        return full_url
+
+    dest_tokens = _extract_location_tokens(dest_clean)
+    if dest_tokens and not any(tok in url_lower for tok in dest_tokens):
+        # Current URL only searches an intermediate leg (e.g. CNN to DXB without CDG)
+        return full_url
+
+    return current_url
+
+
+def _normalize_flight_route(route: str, destination: str) -> str:
+    """
+    Ensures flight.route mentions the final destination.
+    If the route terminates prematurely at an intermediate layover (e.g. 'CNN -> DXB' when heading to CDG),
+    appends the destination to ensure full origin-to-destination visibility.
+    """
+    if not route or not isinstance(route, str):
+        return route
+    dest_clean = destination.strip()
+    dest_tokens = _extract_location_tokens(dest_clean)
+    route_lower = route.lower()
+    if dest_tokens and not any(tok in route_lower for tok in dest_tokens):
+        separator = " → " if "→" in route else " -> "
+        return f"{route}{separator}{dest_clean}"
+    return route
+
+
 def post_process_itinerary(
     itinerary: TripItinerarySchema,
     origin: Optional[str] = None,
@@ -36,18 +94,15 @@ def post_process_itinerary(
     """
     Post-processes the generated itinerary:
     1. Deduplicates heroImages while preserving order.
-    2. Ensures flight bookingSearchUrl covers the complete origin-to-destination route.
+    2. Ensures flight route and bookingSearchUrl cover the complete origin-to-destination journey.
     """
     if getattr(itinerary, "heroImages", None):
         itinerary.heroImages = deduplicate_urls(itinerary.heroImages)
 
     if origin and destination and getattr(itinerary, "flightOptions", None):
-        origin_clean = origin.strip()
-        dest_clean = destination.strip()
-        full_flight_url = f"https://www.google.com/travel/flights?q=flights+from+{origin_clean.replace(' ', '+')}+to+{dest_clean.replace(' ', '+')}"
         for flight in itinerary.flightOptions:
-            if not flight.bookingSearchUrl or "flights" not in flight.bookingSearchUrl.lower():
-                flight.bookingSearchUrl = full_flight_url
+            flight.bookingSearchUrl = _normalize_flight_booking_url(flight.bookingSearchUrl, origin, destination)
+            flight.route = _normalize_flight_route(flight.route, destination)
 
     return itinerary
 
@@ -400,7 +455,12 @@ def _dispatch_ai_generation(prompt: str, expected_days: Optional[int] = None) ->
         )
 
 
-def generate_trip_itinerary(prompt: str, expected_days: Optional[int] = None) -> TripItinerarySchema:
+def generate_trip_itinerary(
+    prompt: str,
+    expected_days: Optional[int] = None,
+    origin: Optional[str] = None,
+    destination: Optional[str] = None,
+) -> TripItinerarySchema:
     """
     Main AI Orchestrator:
     Dispatches generation to AI providers and enforces day count and activity/restaurant completeness.
@@ -409,7 +469,7 @@ def generate_trip_itinerary(prompt: str, expected_days: Optional[int] = None) ->
     """
     try:
         itinerary = _dispatch_ai_generation(prompt, expected_days=expected_days)
-        itinerary = post_process_itinerary(itinerary)
+        itinerary = post_process_itinerary(itinerary, origin=origin, destination=destination)
         if expected_days is not None:
             validate_itinerary_structure(itinerary, expected_days)
         return itinerary
@@ -426,6 +486,7 @@ def generate_trip_itinerary(prompt: str, expected_days: Optional[int] = None) ->
         )
         try:
             itinerary = _dispatch_ai_generation(retry_prompt, expected_days=expected_days)
+            itinerary = post_process_itinerary(itinerary, origin=origin, destination=destination)
             if expected_days is not None:
                 validate_itinerary_structure(itinerary, expected_days)
             return itinerary
@@ -468,7 +529,12 @@ def generate_trip_plan(
         extra_notes=extra_notes,
     )
 
-    itinerary_schema = generate_trip_itinerary(prompt, expected_days=days)
+    itinerary_schema = generate_trip_itinerary(
+        prompt,
+        expected_days=days,
+        origin=origin,
+        destination=destination,
+    )
     itinerary_schema = post_process_itinerary(itinerary_schema, origin=origin, destination=destination)
     itinerary_dict = itinerary_schema.model_dump()
 

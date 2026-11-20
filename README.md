@@ -6,7 +6,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?style=flat&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Groq](https://img.shields.io/badge/Groq_LPU-openai%2Fgpt--oss-F05A28?style=flat)](https://groq.com/)
 [![Gemini](https://img.shields.io/badge/Google_Gemini-3.8--flash-4285F4?style=flat&logo=google&logoColor=white)](https://ai.google.dev/)
-[![Tests](https://img.shields.io/badge/Tests-46%20Passing%20(100%25)-brightgreen?style=flat)]()
+[![Tests](https://img.shields.io/badge/Tests-49%20Passing%20(100%25)-brightgreen?style=flat)]()
 
 Waypoint Backend is a high-performance, modular, zero-spaghetti backend service built with **Django 6.1**, **Django REST Framework (DRF)**, and **PostgreSQL**. It powers the Waypoint AI travel planner with search-grounded day-by-day itineraries, manual booking links, destination photography, hybrid authentication, and automated email roadmaps.
 

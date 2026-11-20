@@ -278,6 +278,29 @@ class AIProviderOrchestrationTests(APITestCase):
         processed = services.post_process_itinerary(schema, origin="Kannur (CNN)", destination="Paris (CDG)")
         self.assertIn("flights+from+Kannur+(CNN)+to+Paris+(CDG)", processed.flightOptions[0].bookingSearchUrl)
 
+    def test_post_process_itinerary_fixes_partial_layover_booking_url(self):
+        schema = get_mock_itinerary_schema(3)
+        # Booking URL that stopped short at an intermediate hub
+        schema.flightOptions[0].bookingSearchUrl = "https://www.google.com/travel/flights?q=flights+from+CNN+to+DXB"
+        processed = services.post_process_itinerary(schema, origin="Kannur (CNN)", destination="Paris (CDG)")
+        self.assertIn("flights+from+Kannur+(CNN)+to+Paris+(CDG)", processed.flightOptions[0].bookingSearchUrl)
+
+    def test_post_process_itinerary_fixes_incomplete_layover_route(self):
+        schema = get_mock_itinerary_schema(3)
+        # Flight route that stopped short at intermediate layover
+        schema.flightOptions[0].route = "CNN → DXB"
+        processed = services.post_process_itinerary(schema, origin="Kannur (CNN)", destination="Paris (CDG)")
+        self.assertIn("Paris (CDG)", processed.flightOptions[0].route)
+        self.assertEqual(processed.flightOptions[0].route, "CNN → DXB → Paris (CDG)")
+
+    def test_post_process_itinerary_preserves_complete_route_and_booking_url(self):
+        schema = get_mock_itinerary_schema(3)
+        schema.flightOptions[0].route = "CNN → DXB → CDG"
+        schema.flightOptions[0].bookingSearchUrl = "https://www.google.com/travel/flights?q=flights+from+CNN+to+CDG"
+        processed = services.post_process_itinerary(schema, origin="Kannur (CNN)", destination="Paris (CDG)")
+        self.assertEqual(processed.flightOptions[0].route, "CNN → DXB → CDG")
+        self.assertEqual(processed.flightOptions[0].bookingSearchUrl, "https://www.google.com/travel/flights?q=flights+from+CNN+to+CDG")
+
 
 class TripGenerationTests(APITestCase):
     def setUp(self):
